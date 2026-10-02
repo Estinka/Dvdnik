@@ -1,28 +1,107 @@
-name: Rusff AI Bot
-on:
-  schedule:
-    - cron: '*/5 * * * *'
-  workflow_dispatch:
+import os
+import urllib.request
+import urllib.parse
+import json
+from bs4 import BeautifulSoup
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
+FORUM_URL = os.getenv("FORUM_URL")
+BOT_USER = os.getenv("BOT_USER")
+BOT_PASS = os.getenv("BOT_PASS")
+HF_TOKEN = os.getenv("HF_TOKEN")
 
-    - name: Setup Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.10'
+def run_bot():
+    print("[INFO] Старт проверки форума Русфф...")
+    
+    # 1. Авторизация на форуме
+    try:
+        login_url = f"{FORUM_URL}/login.php?action=in"
+        login_data = urllib.parse.urlencode({
+            'req_username': BOT_USER,
+            'req_password': BOT_PASS,
+            'login': 'Войти'
+        }).encode('utf-8')
+        
+        req = urllib.request.Request(login_url, data=login_data, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req) as response:
+            headers = response.info()
+            cookies = headers.get_all('Set-Cookie')
+            if not cookies:
+                print("[ERROR] Не удалось войти. Проверьте настройки.")
+                return
+            cookie_str = "; ".join([c.split(";") for c in cookies])
+            print("[SUCCESS] Авторизация успешна!")
+    except Exception as e:
+        print(f"[CRITICAL] Ошибка сети при входе: {e}")
+        return
 
-    - name: Install dependencies
-      run: pip install beautifulsoup4 requests
+    bot_headers = {"User-Agent": "Mozilla/5.0", "Cookie": cookie_str}
+    
+    # 2. Сканирование новых тем
+    try:
+        search_req = urllib.request.Request(f"{FORUM_URL}/search.php?action=show_new", headers=bot_headers)
+        with urllib.request.urlopen(search_req) as s_res:
+            soup = BeautifulSoup(s_res.read().decode('utf-8', errors='ignore'), 'html.parser')
+            
+        links = soup.find_all('a', href=True)
+        topic_urls = [l['href'] for l in links if 'viewtopic.php?id=' in l['href']]
+        
+        if not topic_urls:
+            print("[LOG] Новых сообщений на форуме нет.")
+            return
+            
+        topic_id = topic_urls[0].split('id=')[-1].split('&')[0]
+        
+        # Читаем последний пост в теме
+        t_req = urllib.request.Request(f"{FORUM_URL}/viewtopic.php?id={topic_id}", headers=bot_headers)
+        with urllib.request.urlopen(t_req) as t_res:
+            t_soup = BeautifulSoup(t_res.read().decode('utf-8', errors='ignore'), 'html.parser')
+            
+        posts = t_soup.find_all('div', class_='post')
+        if not posts:
+            return
+            
+        last_post = posts[-1]
+        poster = last_post.find('li', class_='pa-author')
+        poster_name = poster.get_text(strip=True) if poster else ""
+        
+        # Защита от флуда: если последний пост не от бота — отвечаем
+        if BOT_USER.lower() not in poster_name.lower():
+            user_text = last_post.find('div', class_='post-content').get_text(strip=True)
+            print(f"[PROCESS] Запрос к ИИ...")
+            
+            # Обращение к ИИ Qwen на Hugging Face
+            hf_url = "https://api-inference.huggingface.co/models/Qwen/Qwen2.5-72B-Instruct"
+            prompt_data = {
+                "inputs": f"Ты играешь в ролевую текстовую игру на форуме. Напиши игровой ответ на это сообщение: {user_text}",
+                "parameters": {"max_new_tokens": 400}
+            }
+            
+            hf_req = urllib.request.Request(
+                hf_url, 
+                data=bytes(json.dumps(prompt_data), 'utf-8'),
+                headers={"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/json"}
+            )
+            
+            with urllib.request.urlopen(hf_req) as hf_res:
+                res_json = json.loads(hf_res.read().decode('utf-8'))
+                
+            # Простой разбор ответа без сложных условий
+            if isinstance(res_json, list) and len(res_json) > 0:
+                bot_answer = res_json[0].get('generated_text', '')
+            else:
+                bot_answer = res_json.get('generated_text', '')
+                
+            bot_answer = bot_answer.replace(prompt_data["inputs"], "").strip()
+            
+            # Отправка поста на форум
+            post_data = urllib.parse.urlencode({'req_message': bot_answer, 'form_sent': '1'}).encode('utf-8')
+            reply_req = urllib.request.Request(f"{FORUM_URL}/post.php?tid={topic_id}", data=post_data, headers=bot_headers)
+            urllib.request.urlopen(reply_req)
+            print("[SUCCESS] Ответ опубликован на Русфф!")
+        else:
+            print("[LOG] Последний пост уже от бота.")
+    except Exception as e:
+        print(f"[ERROR] Сбой в цикле: {e}")
 
-    - name: Run script
-      env:
-        FORUM_URL: "https://forwardal.ru"
-        BOT_USER: "Дворник"
-        BOT_PASS: "Olga1983"
-        HF_TOKEN: "FINEGRAINED"
-      run: python bot.py
+if __name__ == "__main__":
+    run_bot()
