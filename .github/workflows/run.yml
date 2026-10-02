@@ -26,7 +26,7 @@ def run_bot():
             headers = response.info()
             cookies = headers.get_all('Set-Cookie')
             if not cookies:
-                print("[ERROR] Не удалось войти. Проверьте настройки.")
+                print("[ERROR] Сервер форума отклонил вход. Проверьте настройки.")
                 return
             cookie_str = "; ".join([c.split(";") for c in cookies])
             print("[SUCCESS] Авторизация успешна!")
@@ -49,9 +49,10 @@ def run_bot():
             print("[LOG] Новых сообщений на форуме нет.")
             return
             
-        topic_id = topic_urls[0].split('id=')[-1].split('&')[0]
+        latest_url = topic_urls[0]
+        topic_id = latest_url.split('id=')[-1].split('&')[0]
         
-        # Читаем последний пост в теме
+        # Читаем последний post в теме
         t_req = urllib.request.Request(f"{FORUM_URL}/viewtopic.php?id={topic_id}", headers=bot_headers)
         with urllib.request.urlopen(t_req) as t_res:
             t_soup = BeautifulSoup(t_res.read().decode('utf-8', errors='ignore'), 'html.parser')
@@ -70,9 +71,9 @@ def run_bot():
             print(f"[PROCESS] Запрос к ИИ...")
             
             # Обращение к ИИ Qwen на Hugging Face
-            hf_url = "https://api-inference.huggingface.co/models/Qwen/Qwen2.5-72B-Instruct"
+            hf_url = "https://huggingface.co"
             prompt_data = {
-                "inputs": f"Ты играешь в ролевую текстовую игру на форуме. Напиши игровой ответ на это сообщение: {user_text}",
+                "inputs": f"Ты играешь в ролевую текстовую игру на форуме. Напиши игровой ответ на это сообщение на русском языке: {user_text}",
                 "parameters": {"max_new_tokens": 400}
             }
             
@@ -85,11 +86,12 @@ def run_bot():
             with urllib.request.urlopen(hf_req) as hf_res:
                 res_json = json.loads(hf_res.read().decode('utf-8'))
                 
-            # Простой разбор ответа без сложных условий
             if isinstance(res_json, list) and len(res_json) > 0:
                 bot_answer = res_json[0].get('generated_text', '')
-            else:
+            elif isinstance(res_json, dict):
                 bot_answer = res_json.get('generated_text', '')
+            else:
+                bot_answer = str(res_json)
                 
             bot_answer = bot_answer.replace(prompt_data["inputs"], "").strip()
             
