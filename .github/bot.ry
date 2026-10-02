@@ -1,0 +1,91 @@
+import os
+import urllib.request
+import urllib.parse
+import json
+from bs4 import BeautifulSoup
+
+FORUM_URL = os.getenv("FORUM_URL")
+BOT_USER = os.getenv("BOT_USER")
+BOT_PASS = os.getenv("BOT_PASS")
+HF_TOKEN = os.getenv("HF_TOKEN")
+
+def run_bot():
+    print("[INFO] Попытка входа на форум Русфф...")
+    try:
+        login_url = f"{FORUM_URL}/login.php?action=in"
+        login_data = urllib.parse.urlencode({
+            'req_username': BOT_USER,
+            'req_password': BOT_PASS,
+            'login': 'Войти'
+        }).encode('utf-8')
+        
+        req = urllib.request.Request(login_url, data=login_data, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req) as response:
+            headers = response.info()
+            cookies = headers.get_all('Set-Cookie')
+            if not cookies:
+                print("[ERROR] Не удалось войти. Проверьте логин/пароль.")
+                return
+            cookie_str = "; ".join([c.split(";") for c in cookies])
+            print("[SUCCESS] Авторизация успешна!")
+    except Exception as e:
+        print(f"[CRITICAL] Ошибка сети: {e}")
+        return
+
+    bot_headers = {"User-Agent": "Mozilla/5.0", "Cookie": cookie_str}
+    
+    try:
+        # Читаем страницу новых сообщений форума
+        search_req = urllib.request.Request(f"{FORUM_URL}/search.php?action=show_new", headers=bot_headers)
+        with urllib.request.urlopen(search_req) as s_res:
+            soup = BeautifulSoup(s_res.read().decode('utf-8'), 'html.parser')
+            
+        links = soup.find_all('a', href=True)
+        topic_urls = [l['href'] for l in links if 'viewtopic.php?id=' in l['href']]
+        
+        if not topic_urls:
+            print("[LOG] Новых сообщений на форуме нет.")
+            return
+            
+        latest_url = topic_urls[0]
+        topic_id = latest_url.split('id=')[-1].split('&')[0]
+        
+        # Заходим в тему и читаем последний пост
+        t_req = urllib.request.Request(f"{FORUM_URL}/viewtopic.php?id={topic_id}", headers=bot_headers)
+        with urllib.request.urlopen(t_req) as t_res:
+            t_soup = BeautifulSoup(t_res.read().decode('utf-8'), 'html.parser')
+            
+        posts = t_soup.find_all('div', class_='post')
+        if posts:
+            last_post = posts[-1]
+            poster = last_post.find('li', class_='pa-author')
+            poster_name = poster.get_text(strip=True) if poster else ""
+            
+            # Если последний пост написал НЕ наш бот, то отвечаем
+            if BOT_USER.lower() not in poster_name.lower():
+                user_text = last_post.find('div', class_='post-content').get_text(strip=True)
+                print(f"[PROCESS] Отправляем текст в нейросеть: {user_text[:30]}...")
+                
+                # Запрос к бесплатной ИИ-модели Qwen на Hugging Face
+                hf_url = "https://huggingface.co"
+                hf_req = urllib.request.Request(
+                    hf_url, 
+                    data=bytes(json.dumps({"inputs": user_text}), 'utf-8'),
+                    headers={"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/json"}
+                )
+                with urllib.request.urlopen(hf_req) as hf_res:
+                    res_json = json.loads(hf_res.read().decode('utf-8'))
+                    bot_answer = res_json[0]['generated_text'] if isinstance(res_json, list) else res_json['generated_text']
+                
+                # Публикация ответа на Русфф
+                post_data = urllib.parse.urlencode({'req_message': bot_answer, 'form_sent': '1'}).encode('utf-8')
+                reply_req = urllib.request.Request(f"{FORUM_URL}/post.php?tid={topic_id}", data=post_data, headers=bot_headers)
+                urllib.request.urlopen(reply_req)
+                print("[SUCCESS] ИИ-Ответ успешно опубликован в тему форума!")
+            else:
+                print("[LOG] Последний пост уже от бота. Ждем новых сообщений.")
+    except Exception as e:
+        print(f"[ERROR] Ошибка в процессе: {e}")
+
+if __name__ == "__main__":
+    run_bot()
